@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 // ClickHouse CSV mode
 var clickhouseFlag bool
+var filterField string
+var filterValue string
 
 func removeUnsafeChars(strarr []string) []string {
 	var output = []string{}
@@ -28,6 +31,34 @@ func removeUnsafeChars(strarr []string) []string {
 
 func containsIgnoreCase(s string, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func shouldInclude(headers []string, values []string) bool {
+	if filterField == "" {
+		return true
+	}
+
+	for i, header := range headers {
+		if header == filterField {
+			if i < len(values) {
+				val := values[i]
+				// Special case for prefix filtering with an IP
+				if header == "prefix" {
+					ip := net.ParseIP(filterValue)
+					if ip != nil {
+						_, cidrNet, err := net.ParseCIDR(val)
+						if err == nil {
+							return cidrNet.Contains(ip)
+						}
+					}
+				}
+				// Default to substring match
+				return strings.Contains(strings.ToLower(val), strings.ToLower(filterValue))
+			}
+			return false
+		}
+	}
+	return false
 }
 
 func dumpCity(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
@@ -132,13 +163,16 @@ func dumpCity(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
 			fmt.Sprintf("%v", record.Traits.IsAnonymousProxy),
 			fmt.Sprintf("%v", record.Traits.IsSatelliteProvider),
 		)
+
 		if clickhouseFlag {
-			err = writer.Write(removeUnsafeChars(values))
-		} else {
-			err = writer.Write(values)
+			values = removeUnsafeChars(values)
 		}
-		if err != nil {
-			return err
+
+		if shouldInclude(headers, values) {
+			err = writer.Write(values)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -164,13 +198,16 @@ func dumpConnections(networks *maxminddb.Networks, writer *csv.Writer) (err erro
 			subnet.String(),
 			record.ConnectionType,
 		}
+
 		if clickhouseFlag {
-			err = writer.Write(removeUnsafeChars(values))
-		} else {
-			err = writer.Write(values)
+			values = removeUnsafeChars(values)
 		}
-		if err != nil {
-			return err
+
+		if shouldInclude(headers, values) {
+			err = writer.Write(values)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -235,13 +272,16 @@ func dumpCountry(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
 			fmt.Sprintf("%v", record.Traits.IsAnonymousProxy),
 			fmt.Sprintf("%v", record.Traits.IsSatelliteProvider),
 		}
+
 		if clickhouseFlag {
-			err = writer.Write(removeUnsafeChars(values))
-		} else {
-			err = writer.Write(values)
+			values = removeUnsafeChars(values)
 		}
-		if err != nil {
-			return err
+
+		if shouldInclude(headers, values) {
+			err = writer.Write(values)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -273,13 +313,53 @@ func dumpISP(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
 			record.ISP,
 			record.Organization,
 		}
+
 		if clickhouseFlag {
-			err = writer.Write(removeUnsafeChars(values))
-		} else {
-			err = writer.Write(values)
+			values = removeUnsafeChars(values)
 		}
+
+		if shouldInclude(headers, values) {
+			err = writer.Write(values)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func dumpASN(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
+	headers := []string{
+		"prefix",
+		"autonomous_system_number",
+		"autonomous_system_organization",
+	}
+	err = writer.Write(headers)
+	if err != nil {
+		return err
+	}
+
+	record := geoip2.ASN{}
+	for networks.Next() {
+		subnet, err := networks.Network(&record)
 		if err != nil {
-			return err
+			log.Fatalln(err)
+		}
+		values := []string{
+			subnet.String(),
+			fmt.Sprintf("%d", record.AutonomousSystemNumber),
+			record.AutonomousSystemOrganization,
+		}
+
+		if clickhouseFlag {
+			values = removeUnsafeChars(values)
+		}
+
+		if shouldInclude(headers, values) {
+			err = writer.Write(values)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -287,6 +367,8 @@ func dumpISP(networks *maxminddb.Networks, writer *csv.Writer) (err error) {
 
 func main() {
 	flag.BoolVar(&clickhouseFlag, "c", false, "for ClickHouse dictionary")
+	flag.StringVar(&filterField, "filter-field", "", "field to filter by")
+	flag.StringVar(&filterValue, "filter-value", "", "value to filter by")
 
 	flag.Parse()
 	if flag.NArg() == 0 {
@@ -326,8 +408,10 @@ func main() {
 		err2 = dumpCountry(networks, writer)
 	} else if containsIgnoreCase(fname, "isp") {
 		err2 = dumpISP(networks, writer)
+	} else if containsIgnoreCase(fname, "asn") {
+		err2 = dumpASN(networks, writer)
 	} else {
-		log.Fatal("Dump type not recognized, please rename mmdb file to contain any of the following strings: city, connections, country, or isp")
+		log.Fatal("Dump type not recognized, please rename mmdb file to contain any of the following strings: city, connections, country, isp, or asn")
 	}
 	if err2 != nil {
 		log.Fatal(err2.Error())
